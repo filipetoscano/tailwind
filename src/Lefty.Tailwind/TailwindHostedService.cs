@@ -1,6 +1,7 @@
 ﻿using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Mono.Unix;
 using System.Diagnostics;
 using System.Net.Http.Json;
 using System.Runtime.InteropServices;
@@ -160,6 +161,17 @@ public class TailwindHostedService : BackgroundService
          */
         _logger.LogInformation( "Downloading from {Url}...", asset.DownloadUrl );
         await DownloadTo( asset.DownloadUrl, targetExe, cancellationToken );
+
+
+        /*
+         * Ensure +x
+         */
+        if ( RuntimeInformation.IsOSPlatform( OSPlatform.OSX ) == true ||
+             RuntimeInformation.IsOSPlatform( OSPlatform.Linux ) == true )
+        {
+            var info = new UnixFileInfo( targetExe );
+            info.FileAccessPermissions |= FileAccessPermissions.UserExecute;
+        }
 
         return targetExe;
     }
