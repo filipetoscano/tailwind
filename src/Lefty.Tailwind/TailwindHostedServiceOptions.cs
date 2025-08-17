@@ -13,6 +13,11 @@ public class TailwindHostedServiceOptions
     public string DownloadTo { get; set; } = "~/bin";
 
     /// <summary>
+    /// Allow updating to the latest version (if internet is available).
+    /// </summary>
+    public bool AllowUpdates { get; set; } = true;
+
+    /// <summary>
     /// Allow use of draft releases.
     /// </summary>
     public bool UseDraft { get; set; } = false;

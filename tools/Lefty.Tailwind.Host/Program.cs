@@ -14,10 +14,9 @@ public class Program
         builder.Services.AddOptions();
         builder.Services.AddHttpClient();
 
-        builder.Services.Configure<TailwindHostedServiceOptions>( o =>
-        {
-            // Options
-        } );
+        builder.Services.AddOptions<TailwindHostedServiceOptions>()
+            .Bind( builder.Configuration.GetSection( "Tailwind" ) );
+
         builder.Services.AddHostedService<TailwindHostedService>();
 
 

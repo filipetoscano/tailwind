@@ -1,8 +1,10 @@
 ﻿using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using System.Diagnostics;
 using System.Net.Http.Json;
 using System.Runtime.InteropServices;
+using System.Text.RegularExpressions;
 
 namespace Lefty.Tailwind;
 
@@ -29,46 +31,240 @@ public class TailwindHostedService : BackgroundService
     /// <inheritdoc />
     protected override async Task ExecuteAsync( CancellationToken stoppingToken )
     {
-        _logger.LogInformation( "Tailwind" );
+        /*
+         *
+         */
+        var cts = new CancellationTokenSource();
 
-        var opt = _om.CurrentValue;
+        _om.OnChange( ( x, _ ) =>
+        {
+            _logger.LogWarning( "Tailwind: Configuration reloaded" );
+
+            cts.Cancel();
+        } );
 
 
         /*
          * 
          */
-        var bin = GetBestTailwindCliBinary();
-        var latest = await GetLatestGithubRelease();
+        while ( stoppingToken.IsCancellationRequested == false )
+        {
+            var lts = CancellationTokenSource.CreateLinkedTokenSource( stoppingToken, cts.Token );
 
+            var opt = _om.CurrentValue;
+            var tw = await EnsureTailwind( opt, stoppingToken );
+            var cmd = ExpandCommand( opt, tw );
+            FileSystemWatcher? fsw = null;
+
+
+            /*
+             * 
+             */
+            if ( cmd == null )
+            {
+                _logger.LogWarning( "** Nope" );
+            }
+            else
+            {
+                fsw = MonitorFile( cmd.InputFile, ( ea ) =>
+                {
+                    _logger.LogWarning( "Tailwind: Input file changed" );
+
+                    cts.Cancel();
+                } );
+
+
+                /*
+                 * 
+                 */
+                await File.WriteAllTextAsync( cmd.OutputFile, "/* empty */" );
+            }
+
+
+            /*
+             * 
+             */
+            await Task.Delay( Timeout.Infinite, lts.Token )
+                .ContinueWith( ( _ ) => { } );
+
+            if ( cts.IsCancellationRequested == true )
+            {
+                fsw?.Dispose();
+                cts.Dispose();
+
+                cts = new CancellationTokenSource();
+            }
+        }
+
+
+        /*
+         * 
+         */
+        cts.Dispose();
+    }
+
+
+    /// <summary>
+    /// Ensures that the Tailwind binary is available.
+    /// </summary>
+    internal async Task<string?> EnsureTailwind( TailwindHostedServiceOptions opt, CancellationToken cancellationToken )
+    {
+        /*
+         * Whe
+         */
+        var targetDir = ResolvePath( opt.DownloadTo );
+        _logger.LogDebug( "Target {TargetDir}", targetDir );
+
+        var bin = GetBestTailwindCliBinary( cancellationToken );
+        var targetExe = Path.Combine( targetDir, bin );
+
+
+        /*
+         * 
+         */
+        string? currentVersion = null;
+
+        if ( File.Exists( targetExe ) == true )
+        {
+            if ( opt.AllowUpdates == false )
+            {
+                _logger.LogInformation( "Tailwind available, but will not check for updates: using as is" );
+                return targetExe;
+            }
+
+            currentVersion = await GetCurrentVersion( targetExe, cancellationToken );
+            _logger.LogDebug( "Current: {Version}", currentVersion );
+        }
+
+
+        /*
+         * 
+         */
+        var latest = await GetLatestGithubRelease( cancellationToken );
         var asset = latest.Assets?.SingleOrDefault( x => x.Name == bin );
 
         if ( asset == null )
-            return;
+            return null;
 
-        _logger.LogInformation( "Version {TagName}, Binary {Binary}, Size {Size}", latest.TagName, asset.Name, asset.Size );
+        _logger.LogDebug( "Latest {Version} - Binary {Binary}, Size {Size}", latest.TagName, asset.Name, asset.Size );
+
+        if ( latest.TagName == currentVersion )
+        {
+            _logger.LogInformation( "Tailwind already up-to-date" );
+            return targetExe;
+        }
 
 
         /*
          * 
          */
-        var targetDir = ResolveDirectory( opt.DownloadTo );
-        _logger.LogInformation( "Target {TargetDir}", targetDir );
+        _logger.LogInformation( "Downloading from {Url}...", asset.DownloadUrl );
+        await DownloadTo( asset.DownloadUrl, targetExe, cancellationToken );
+
+        return targetExe;
+    }
+
+
+    /// <summary />
+    internal TailwindCommand? ExpandCommand( TailwindHostedServiceOptions opt, string? tw )
+    {
+        if ( tw == null )
+            return null;
+
+        var input = ResolvePath( opt.InputFile );
+        var output = ResolvePath( opt.OutputFile );
+
+        return new TailwindCommand()
+        {
+            Tailwind = tw,
+            InputFile = input,
+            OutputFile = output,
+        };
+    }
+
+
+    /// <summary />
+    internal FileSystemWatcher MonitorFile( string filePath, Action<FileSystemEventArgs> onChange )
+    {
+        var directory = Path.GetDirectoryName( filePath );
+        var fileName = Path.GetFileName( filePath );
+
+        if ( directory == null )
+            throw new ArgumentOutOfRangeException( nameof( filePath ), "Empty directory name" );
+
+        if ( fileName == null )
+            throw new ArgumentOutOfRangeException( nameof( fileName ), "Empty file name" );
+
+        var watcher = new FileSystemWatcher( directory, fileName )
+        {
+            NotifyFilter = NotifyFilters.LastWrite
+                         | NotifyFilters.FileName
+                         | NotifyFilters.Size,
+            EnableRaisingEvents = true,
+            IncludeSubdirectories = false,
+        };
 
 
         /*
          * 
          */
-        var targetExe = Path.Combine( targetDir, asset.Name );
+        watcher.Changed += ( s, e ) => onChange( e );
+        watcher.Created += ( s, e ) => onChange( e );
+        watcher.Deleted += ( s, e ) => onChange( e );
+        watcher.Renamed += ( s, e ) => onChange( e );
 
-        if ( File.Exists( targetExe ) == false )
+
+        /*
+         * 
+         */
+        watcher.Error += ( s, e ) =>
         {
-            _logger.LogInformation( "Downloading from {Url}...", asset.DownloadUrl );
-            await DownloadTo( asset.DownloadUrl, targetExe );
-        }
-        else
+            _logger.LogWarning( "FileSystemWatcher buffer overflowed. Monitoring restarted." );
+            watcher.EnableRaisingEvents = false;
+            watcher.EnableRaisingEvents = true;
+        };
+
+        return watcher;
+    }
+
+
+    /// <summary />
+    internal async Task<string?> GetCurrentVersion( string targetExe, CancellationToken cancellationToken )
+    {
+        var startInfo = new ProcessStartInfo
         {
-            _logger.LogInformation( "Already downloaded" );
-        }
+            FileName = targetExe,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+
+        using var process = new Process { StartInfo = startInfo, EnableRaisingEvents = false };
+
+        process.Start();
+
+
+        /*
+         * 
+         */
+        string? firstLine = await process.StandardOutput.ReadLineAsync().WaitAsync( cancellationToken );
+
+        await process.WaitForExitAsync( cancellationToken );
+
+        if ( string.IsNullOrWhiteSpace( firstLine ) == true )
+            return null;
+
+
+        /*
+         * 
+         */
+        var match = Regex.Match( firstLine, @"v\d+\.\d+\.\d+" );
+
+        if ( match.Success == false )
+            return null;
+
+        return match.Value;
     }
 
 
@@ -78,17 +274,17 @@ public class TailwindHostedService : BackgroundService
     /// <returns>
     /// Github release.
     /// </returns>
-    internal async Task<GithubRelease> GetLatestGithubRelease()
+    internal async Task<GithubRelease> GetLatestGithubRelease( CancellationToken cancellationToken )
     {
         const string apiUrl = "https://api.github.com/repos/tailwindlabs/tailwindcss/releases/latest";
 
         using var request = new HttpRequestMessage( HttpMethod.Get, apiUrl );
         request.Headers.Add( "User-Agent", "lefty-tailwind" );
 
-        using var response = await _http.SendAsync( request );
+        using var response = await _http.SendAsync( request, cancellationToken );
         response.EnsureSuccessStatusCode();
 
-        var release = await response.Content.ReadFromJsonAsync<GithubRelease>();
+        var release = await response.Content.ReadFromJsonAsync<GithubRelease>( cancellationToken );
 
         return release!;
     }
@@ -98,17 +294,19 @@ public class TailwindHostedService : BackgroundService
     /// Determines the best Tailwind CLI binary name for the current platform.
     /// </summary>
     /// <returns>Binary file name (e.g. "tailwindcss-windows-x64.exe")</returns>
-    internal static string GetBestTailwindCliBinary()
+    internal static string GetBestTailwindCliBinary( CancellationToken cancellationToken )
     {
-        // Detect architecture
         string arch = RuntimeInformation.ProcessArchitecture switch
         {
             Architecture.Arm64 => "arm64",
             Architecture.X64 => "x64",
-            _ => throw new PlatformNotSupportedException( "Only x64 and arm64 are supported." )
+            _ => throw new PlatformNotSupportedException( $"Arch {RuntimeInformation.ProcessArchitecture} is not supported." )
         };
 
-        // Detect OS
+
+        /*
+         * 
+         */
         if ( RuntimeInformation.IsOSPlatform( OSPlatform.Windows ) == true )
         {
             return $"tailwindcss-windows-{arch}.exe";
@@ -119,7 +317,6 @@ public class TailwindHostedService : BackgroundService
         }
         else if ( RuntimeInformation.IsOSPlatform( OSPlatform.Linux ) == true )
         {
-            // Prefer glibc build by default (no "-musl"), unless you know you need musl (Alpine Linux)
             bool isMusl = IsMuslLibc();
 
             return isMusl
@@ -136,21 +333,27 @@ public class TailwindHostedService : BackgroundService
     /// </summary>
     internal static bool IsMuslLibc()
     {
+        // Check path
+        var fileName = "/usr/bin/ldd";
+
+        if ( File.Exists( fileName ) == false )
+            return false;
+
         try
         {
             // Look for "musl" in ldd version output (works on Alpine)
             var psi = new System.Diagnostics.ProcessStartInfo
             {
-                FileName = "ldd",
+                FileName = fileName,
                 Arguments = "--version",
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
-                UseShellExecute = false
+                UseShellExecute = false,
             };
 
             using var proc = System.Diagnostics.Process.Start( psi );
             string output = proc!.StandardOutput.ReadToEnd() + proc.StandardError.ReadToEnd();
-            proc.WaitForExit( 1000 );
+            proc.WaitForExit( 1_000 );
 
             return output.ToLowerInvariant().Contains( "musl" );
         }
@@ -162,9 +365,8 @@ public class TailwindHostedService : BackgroundService
     }
 
 
-
     /// <summary />
-    internal static string ResolveDirectory( string path )
+    internal static string ResolvePath( string path )
     {
         // Determine environment
         var env = Environment.GetEnvironmentVariable( "ASPNETCORE_ENVIRONMENT" )
@@ -199,7 +401,7 @@ public class TailwindHostedService : BackgroundService
 
 
     /// <summary />
-    private static DirectoryInfo? WalkUpTo( DirectoryInfo start, Func<DirectoryInfo, bool> predicate )
+    internal static DirectoryInfo? WalkUpTo( DirectoryInfo start, Func<DirectoryInfo, bool> predicate )
     {
         var dir = start;
 
@@ -218,7 +420,7 @@ public class TailwindHostedService : BackgroundService
     /// <summary>
     /// Downloads a file from the specified URL and saves it to the given path, overwriting if it exists.
     /// </summary>
-    public async Task DownloadTo( string url, string filePath )
+    internal async Task DownloadTo( string url, string filePath, CancellationToken cancellationToken )
     {
         if ( string.IsNullOrWhiteSpace( url ) )
             throw new ArgumentException( "URL cannot be null or empty.", nameof( url ) );
