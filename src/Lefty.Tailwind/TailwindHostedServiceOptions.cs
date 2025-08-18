@@ -4,6 +4,11 @@
 public class TailwindHostedServiceOptions
 {
     /// <summary>
+    /// Github authentication token, in order to avoid (low) rate limiting.
+    /// </summary>
+    public string? GithubToken { get; set; }
+
+    /// <summary>
     /// Where to download binary to.
     /// </summary>
     /// <remarks>
@@ -11,6 +16,11 @@ public class TailwindHostedServiceOptions
     /// Otherwise, is relative path to project root.
     /// </remarks>
     public string DownloadTo { get; set; } = "~/bin";
+
+    /// <summary>
+    /// How old, in minutes, the 'check for latest' can be.
+    /// </summary>
+    public int MaxLatestCheckAgeMins { get; set; } = 24 * 60;
 
     /// <summary>
     /// Allow updating to the latest version (if internet is available).

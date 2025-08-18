@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Mono.Unix;
 using System.Diagnostics;
+using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
@@ -127,9 +128,21 @@ public class TailwindHostedService : BackgroundService
 
         if ( File.Exists( targetExe ) == true )
         {
+            if ( await IsLatestCheckYoung( targetExe, opt, cancellationToken ) == true )
+            {
+                _logger.LogInformation( "Tailwind available, and latest check is recent: using as is" );
+                return targetExe;
+            }
+
             if ( opt.AllowUpdates == false )
             {
                 _logger.LogInformation( "Tailwind available, but will not check for updates: using as is" );
+                return targetExe;
+            }
+
+            if ( await HasInternet() == false )
+            {
+                _logger.LogInformation( "Tailwind available, but have no internet atm: using as is" );
                 return targetExe;
             }
 
@@ -139,13 +152,75 @@ public class TailwindHostedService : BackgroundService
 
 
         /*
+         * Happy path: latest version is the version we need :)
+         */
+        var latest = await GetLatestGithubRelease( opt.GithubToken, cancellationToken );
+
+        if ( latest == null )
+        {
+            if ( File.Exists( targetExe ) == true )
+            {
+                _logger.LogInformation( "Tailwind available but failed to check latest version, using as is" );
+                return targetExe;
+            }
+            else
+            {
+                return null;
+            }
+        }
+
+        await WriteLatestCheck( targetExe, cancellationToken );
+
+
+        /*
          * 
          */
-        var latest = await GetLatestGithubRelease( cancellationToken );
+        if ( latest.IsDraft == true || latest.IsPreRelease == true )
+        {
+            var useLatest = false;
+
+            if ( latest.IsDraft == true && opt.UseDraft == true )
+                useLatest = true;
+
+            if ( latest.IsPreRelease == true && opt.UsePreRelease == true )
+                useLatest = true;
+
+            if ( useLatest == false )
+            {
+                var all = await GetAllGithubReleases( opt.GithubToken, cancellationToken );
+                _logger.LogDebug( "Tailwind: Has {NrReleases} releases", all.Count );
+
+                var allq = all.AsQueryable();
+
+                if ( opt.UseDraft == false )
+                    allq = allq.Where( x => x.IsDraft == false );
+
+                if ( opt.UsePreRelease == false )
+                    allq = allq.Where( x => x.IsPreRelease == false );
+
+                var candidate = allq.FirstOrDefault();
+
+                if ( candidate == null )
+                {
+                    _logger.LogWarning( "No matching release found: use draft={UseDraft}, use pre-release={UsePreRelease}", opt.UseDraft, opt.UsePreRelease );
+                    return null;
+                }
+
+                latest = candidate;
+            }
+        }
+
+
+        /*
+         * 
+         */
         var asset = latest.Assets?.SingleOrDefault( x => x.Name == bin );
 
         if ( asset == null )
+        {
+            _logger.LogWarning( "No tailwind for arch/OS: no asset with name {AssetName} found", bin );
             return null;
+        }
 
         _logger.LogDebug( "Latest {Version} - Binary {Binary}, Size {Size}", latest.TagName, asset.Name, asset.Size );
 
@@ -178,9 +253,53 @@ public class TailwindHostedService : BackgroundService
 
 
     /// <summary />
-    internal TailwindCommand? ExpandCommand( TailwindHostedServiceOptions opt, string? tw )
+    internal async Task WriteLatestCheck( string targetExe, CancellationToken cancellationToken )
     {
-        if ( tw == null )
+        var path = Path.Combine( Path.GetDirectoryName( targetExe )!, "lefty-tailwind.txt" );
+        var contents = DateTime.UtcNow.ToString( "o" );
+
+        await File.WriteAllTextAsync( path, contents, cancellationToken );
+    }
+
+
+    /// <summary />
+    internal async Task<bool> IsLatestCheckYoung( string targetExe, TailwindHostedServiceOptions opt, CancellationToken cancellationToken )
+    {
+        if ( opt.MaxLatestCheckAgeMins == 0 )
+            return false;
+
+
+        /*
+         * 
+         */
+        var path = Path.Combine( Path.GetDirectoryName( targetExe )!, "lefty-tailwind.txt" );
+
+        if ( File.Exists( path ) == false )
+            return false;
+
+        var contents = await File.ReadAllTextAsync( path, cancellationToken );
+
+        if ( DateTime.TryParseExact( contents, "o", null, System.Globalization.DateTimeStyles.None, out var age ) == false )
+            return false;
+
+
+        /*
+         * 
+         */
+        var now = DateTime.UtcNow;
+        var delta = now - age;
+
+        if ( delta.TotalMinutes < opt.MaxLatestCheckAgeMins )
+            return true;
+
+        return false;
+    }
+
+
+    /// <summary />
+    internal TailwindCommand? ExpandCommand( TailwindHostedServiceOptions opt, string? binary )
+    {
+        if ( binary == null )
             return null;
 
         var input = ResolvePath( opt.InputFile );
@@ -188,7 +307,7 @@ public class TailwindHostedService : BackgroundService
 
         return new TailwindCommand()
         {
-            Tailwind = tw,
+            Tailwind = binary,
             InputFile = input,
             OutputFile = output,
         };
@@ -241,6 +360,26 @@ public class TailwindHostedService : BackgroundService
 
 
     /// <summary />
+    internal async Task<bool> HasInternet()
+    {
+        try
+        {
+            using var cts = new CancellationTokenSource( TimeSpan.FromSeconds( 2 ) );
+
+            using var response = await _http.GetAsync( "https://www.google.com/generate_204",
+                HttpCompletionOption.ResponseHeadersRead,
+                cts.Token );
+
+            return response.StatusCode == System.Net.HttpStatusCode.NoContent;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+
+    /// <summary />
     internal async Task<string?> GetCurrentVersion( string targetExe, CancellationToken cancellationToken )
     {
         var startInfo = new ProcessStartInfo
@@ -284,21 +423,59 @@ public class TailwindHostedService : BackgroundService
     /// Fetches the latest release from GitHub for the tailwindcss repository.
     /// </summary>
     /// <returns>
-    /// Github release.
+    /// Latest Github release.
     /// </returns>
-    internal async Task<GithubRelease> GetLatestGithubRelease( CancellationToken cancellationToken )
+    internal async Task<GithubRelease> GetLatestGithubRelease( string? githubToken, CancellationToken cancellationToken )
     {
-        const string apiUrl = "https://api.github.com/repos/tailwindlabs/tailwindcss/releases/latest";
+        const string ApiUrl = "https://api.github.com/repos/tailwindlabs/tailwindcss/releases/latest";
 
-        using var request = new HttpRequestMessage( HttpMethod.Get, apiUrl );
+        using var request = new HttpRequestMessage( HttpMethod.Get, ApiUrl );
+        request.Headers.Add( "X-GitHub-Api-Version", "2022-11-28" );
         request.Headers.Add( "User-Agent", "lefty-tailwind" );
 
+        if ( githubToken != null )
+            request.Headers.Authorization = new AuthenticationHeaderValue( "Bearer", githubToken );
+
+
+        /*
+         * 
+         */
         using var response = await _http.SendAsync( request, cancellationToken );
         response.EnsureSuccessStatusCode();
 
         var release = await response.Content.ReadFromJsonAsync<GithubRelease>( cancellationToken );
 
         return release!;
+    }
+
+
+    /// <summary>
+    /// Fetches all releases from GitHub for the tailwindcss repository.
+    /// </summary>
+    /// <returns>
+    /// All Github releases.
+    /// </returns>
+    internal async Task<List<GithubRelease>> GetAllGithubReleases( string? githubToken, CancellationToken cancellationToken )
+    {
+        const string ApiUrl = "https://api.github.com/repos/tailwindlabs/tailwindcss/releases";
+
+        using var request = new HttpRequestMessage( HttpMethod.Get, ApiUrl );
+        request.Headers.Add( "X-GitHub-Api-Version", "2022-11-28" );
+        request.Headers.Add( "User-Agent", "lefty-tailwind" );
+
+        if ( githubToken != null )
+            request.Headers.Authorization = new AuthenticationHeaderValue( "Bearer", githubToken );
+
+
+        /*
+         * 
+         */
+        using var response = await _http.SendAsync( request, cancellationToken );
+        response.EnsureSuccessStatusCode();
+
+        var all = await response.Content.ReadFromJsonAsync<List<GithubRelease>>( cancellationToken );
+
+        return all!;
     }
 
 
