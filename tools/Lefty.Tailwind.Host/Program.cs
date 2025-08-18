@@ -1,3 +1,5 @@
+using Serilog;
+
 namespace Lefty.Tailwind.Host;
 
 /// <summary />
@@ -7,6 +9,14 @@ public class Program
     public static void Main( string[] args )
     {
         var builder = WebApplication.CreateBuilder( args );
+
+        builder.Services.AddSerilog( ( svc, lc ) =>
+        {
+            lc
+                .ReadFrom.Configuration( builder.Configuration )
+                .ReadFrom.Services( svc )
+                .Enrich.FromLogContext();
+        } );
 
         // Add services to the container.
         builder.Services.AddRazorPages();
