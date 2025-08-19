@@ -65,6 +65,9 @@ public class TailwindHostedService : BackgroundService
             if ( cmd == null )
             {
                 _logger.LogWarning( "** Nope" );
+
+                await Task.Delay( Timeout.Infinite, lts.Token )
+                    .ContinueWith( ( _ ) => { } );
             }
             else
             {
@@ -80,15 +83,13 @@ public class TailwindHostedService : BackgroundService
                  * 
                  */
                 await File.WriteAllTextAsync( cmd.OutputFile, "/* empty */" );
+                await RunTailwind( cmd.Tailwind, cmd.AsArguments(), lts.Token );
             }
 
 
             /*
              * 
              */
-            await Task.Delay( Timeout.Infinite, lts.Token )
-                .ContinueWith( ( _ ) => { } );
-
             if ( cts.IsCancellationRequested == true )
             {
                 fsw?.Dispose();
@@ -253,6 +254,113 @@ public class TailwindHostedService : BackgroundService
 
 
     /// <summary />
+    internal TailwindCommand? ExpandCommand( TailwindHostedServiceOptions opt, string? binary )
+    {
+        if ( binary == null )
+            return null;
+
+        var input = ResolvePath( opt.InputFile );
+        var output = ResolvePath( opt.OutputFile );
+
+        return new TailwindCommand()
+        {
+            Tailwind = binary,
+            InputFile = input,
+            OutputFile = output,
+            OutputMinify = opt.OutputMinify,
+            OutputOptimize = opt.OutputOptimize,
+        };
+    }
+
+
+    /// <summary>
+    /// Starts the Tailwind CLI binary and streams output to the logger.
+    /// </summary>
+    /// <param name="binaryPath">Path to tailwind binary (e.g. "tailwindcss").</param>
+    /// <param name="arguments">Arguments to pass to Tailwind CLI.</param>
+    /// <param name="cancellationToken">Cancellation token to kill the process.</param>
+    internal async Task<int> RunTailwind( string binaryPath, string arguments, CancellationToken cancellationToken )
+    {
+        var tcs = new TaskCompletionSource<int>( TaskCreationOptions.RunContinuationsAsynchronously );
+
+        var process = new Process
+        {
+            StartInfo = new ProcessStartInfo
+            {
+                FileName = binaryPath,
+                Arguments = arguments,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            },
+
+            EnableRaisingEvents = true,
+        };
+
+
+        /*
+         * Hook up output events
+         */
+        process.OutputDataReceived += ( s, e ) =>
+        {
+            if ( string.IsNullOrEmpty( e.Data ) == true )
+                return;
+
+            _logger.LogDebug( "Tailwind: {Line}", e.Data );
+        };
+        process.ErrorDataReceived += ( s, e ) =>
+        {
+            if ( string.IsNullOrEmpty( e.Data ) == true )
+                return;
+
+            _logger.LogDebug( "Tailwind: {Line}", e.Data );
+        };
+
+        process.Exited += ( s, e ) =>
+        {
+            tcs.TrySetResult( process.ExitCode );
+            process.Dispose();
+        };
+
+        try
+        {
+            if ( process.Start() == false )
+                throw new InvalidOperationException( $"Failed to start {binaryPath}" );
+
+            process.BeginOutputReadLine();
+            process.BeginErrorReadLine();
+
+            // Cancel process if token triggers
+            using ( cancellationToken.Register( () =>
+            {
+                try
+                {
+                    if ( process.HasExited == false )
+                        process.Kill( true );
+                }
+                catch
+                {
+                }
+            } ) )
+            {
+                return await tcs.Task.ConfigureAwait( false );
+            }
+        }
+        catch ( TaskCanceledException )
+        {
+            // ?
+            return -2;
+        }
+        catch ( Exception ex )
+        {
+            _logger.LogError( ex, "Failed to run Tailwind binary" );
+            return -1;
+        }
+    }
+
+
+    /// <summary />
     internal async Task WriteLatestCheck( string targetExe, CancellationToken cancellationToken )
     {
         var path = Path.Combine( Path.GetDirectoryName( targetExe )!, "lefty-tailwind.txt" );
@@ -293,24 +401,6 @@ public class TailwindHostedService : BackgroundService
             return true;
 
         return false;
-    }
-
-
-    /// <summary />
-    internal TailwindCommand? ExpandCommand( TailwindHostedServiceOptions opt, string? binary )
-    {
-        if ( binary == null )
-            return null;
-
-        var input = ResolvePath( opt.InputFile );
-        var output = ResolvePath( opt.OutputFile );
-
-        return new TailwindCommand()
-        {
-            Tailwind = binary,
-            InputFile = input,
-            OutputFile = output,
-        };
     }
 
 
