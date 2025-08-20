@@ -29,7 +29,7 @@
   </PropertyGroup>
 
   <ItemGroup Condition=" '$(IsPackable)' == 'true' ">
-    <None Include="$(MSBuildThisFileDirectory)docs\img\icon.png">
+    <None Include="$(MSBuildThisFileDirectory)docs\img\logo.png">
       <Pack>true</Pack>
       <PackagePath>/$(PackageIcon)</PackagePath>
       <Visible>false</Visible>
