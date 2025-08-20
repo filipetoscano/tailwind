@@ -1,0 +1,39 @@
+<Project>
+
+  <PropertyGroup>
+    <Version>0.1.0</Version>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <Authors>Filipe Toscano</Authors>
+    <Product>Run Tailwind CLI inside ASP.NET host</Product>
+    <Copyright>Copyright © Filipe Toscano</Copyright>
+    <NeutralLanguage>en-US</NeutralLanguage>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/filipetoscano/tailwind/</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/filipetoscano/tailwind.git</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <DebugType>portable</DebugType>
+
+    <!-- Packaging properties -->
+    <IsPackable>false</IsPackable>
+    <PackageDescription>Run Tailwind CLI inside ASP.NET host</PackageDescription>
+    <PackageIconUrl>https://media.githubusercontent.com/media/filipetoscano/tailwind/master/docs/img/icon.png</PackageIconUrl>
+    <PackageIcon>icon.png</PackageIcon>
+    <PackageTags>dotnet;tailwind</PackageTags>
+
+    <!-- Debuging properties -->
+    <IncludeSymbols>true</IncludeSymbols>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+  </PropertyGroup>
+
+  <ItemGroup Condition=" '$(IsPackable)' == 'true' ">
+    <None Include="$(MSBuildThisFileDirectory)docs\img\icon.png">
+      <Pack>true</Pack>
+      <PackagePath>/$(PackageIcon)</PackagePath>
+      <Visible>false</Visible>
+    </None>
+  </ItemGroup>
+
+</Project>
