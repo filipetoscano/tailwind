@@ -27,7 +27,8 @@ public class Program
         builder.Services.AddOptions<TailwindHostedServiceOptions>()
             .Bind( builder.Configuration.GetSection( "Tailwind" ) );
 
-        builder.Services.AddHostedService<TailwindHostedService>();
+        if ( builder.Environment.IsDevelopment() == true )
+            builder.Services.AddHostedService<TailwindHostedService>();
 
 
         /*
