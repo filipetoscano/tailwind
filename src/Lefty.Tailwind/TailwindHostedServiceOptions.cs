@@ -45,7 +45,7 @@ public class TailwindHostedServiceOptions
     /// <summary>
     /// Output CSS file.
     /// </summary>
-    public string OutputFile { get; set; } = "./wwwroot/css/output.css";
+    public string OutputFile { get; set; } = "./wwwroot/css/site.css";
 
     /// <summary />
     public bool OutputMinify { get; set; } = false;
