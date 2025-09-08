@@ -170,8 +170,6 @@ public class TailwindHostedService : BackgroundService
             }
         }
 
-        await WriteLatestCheck( targetExe, cancellationToken );
-
 
         /*
          * 
@@ -204,6 +202,8 @@ public class TailwindHostedService : BackgroundService
                 if ( candidate == null )
                 {
                     _logger.LogWarning( "No matching release found: use draft={UseDraft}, use pre-release={UsePreRelease}", opt.UseDraft, opt.UsePreRelease );
+                    await WriteLatestCheck( targetExe, cancellationToken );
+
                     return null;
                 }
 
@@ -220,6 +220,8 @@ public class TailwindHostedService : BackgroundService
         if ( asset == null )
         {
             _logger.LogWarning( "No tailwind for arch/OS: no asset with name {AssetName} found", bin );
+            await WriteLatestCheck( targetExe, cancellationToken );
+
             return null;
         }
 
@@ -228,6 +230,8 @@ public class TailwindHostedService : BackgroundService
         if ( latest.TagName == currentVersion )
         {
             _logger.LogInformation( "Tailwind already up-to-date" );
+            await WriteLatestCheck( targetExe, cancellationToken );
+
             return targetExe;
         }
 
@@ -237,6 +241,7 @@ public class TailwindHostedService : BackgroundService
          */
         _logger.LogInformation( "Downloading from {Url}...", asset.DownloadUrl );
         await DownloadTo( asset.DownloadUrl, targetExe, cancellationToken );
+        await WriteLatestCheck( targetExe, cancellationToken );
 
 
         /*
@@ -365,6 +370,9 @@ public class TailwindHostedService : BackgroundService
     {
         var path = Path.Combine( Path.GetDirectoryName( targetExe )!, "lefty-tailwind.txt" );
         var contents = DateTime.UtcNow.ToString( "o" );
+
+        // Ensure directory exists
+        Directory.CreateDirectory( Path.GetDirectoryName( path )! );
 
         await File.WriteAllTextAsync( path, contents, cancellationToken );
     }
