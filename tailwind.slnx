@@ -1,0 +1,19 @@
+<Solution>
+  <Folder Name="/cicd/">
+    <File Path=".github/workflows/ci.yml" />
+    <File Path=".github/workflows/release.yml" />
+    <File Path="cicd/ci.sh" />
+    <File Path="cicd/release.sh" />
+  </Folder>
+  <Folder Name="/sln/">
+    <File Path=".gitignore" />
+    <File Path="Directory.Build.props" />
+    <File Path="README.md" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/Lefty.Tailwind/Lefty.Tailwind.csproj" />
+  </Folder>
+  <Folder Name="/tools/">
+    <Project Path="tools/Lefty.Tailwind.Host/Lefty.Tailwind.Host.csproj" />
+  </Folder>
+</Solution>
