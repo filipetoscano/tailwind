@@ -82,7 +82,7 @@ public class TailwindHostedService : BackgroundService
                 /*
                  * 
                  */
-                await File.WriteAllTextAsync( cmd.OutputFile, "/* empty */" );
+                await File.WriteAllTextAsync( cmd.OutputFile, "/* empty */", lts.Token );
                 await RunTailwind( cmd.Tailwind, cmd.AsArguments(), lts.Token );
             }
 
@@ -98,6 +98,8 @@ public class TailwindHostedService : BackgroundService
                 cts = new CancellationTokenSource();
                 oldCts.Dispose();
             }
+
+            lts.Dispose();
         }
 
 
@@ -156,7 +158,17 @@ public class TailwindHostedService : BackgroundService
         /*
          * Happy path: latest version is the version we need :)
          */
-        var latest = await GetLatestGithubRelease( opt.GithubToken, cancellationToken );
+        GithubRelease? latest;
+
+        try
+        {
+            latest = await GetLatestGithubRelease( opt.GithubToken, cancellationToken );
+        }
+        catch ( Exception ex ) when ( ex is not OperationCanceledException )
+        {
+            _logger.LogWarning( ex, "Failed to fetch latest GitHub release" );
+            latest = null;
+        }
 
         if ( latest == null )
         {
@@ -188,7 +200,21 @@ public class TailwindHostedService : BackgroundService
 
             if ( useLatest == false )
             {
-                var all = await GetAllGithubReleases( opt.GithubToken, cancellationToken );
+                List<GithubRelease> all;
+
+                try
+                {
+                    all = await GetAllGithubReleases( opt.GithubToken, cancellationToken );
+                }
+                catch ( Exception ex ) when ( ex is not OperationCanceledException )
+                {
+                    _logger.LogWarning( ex, "Failed to fetch GitHub releases" );
+
+                    if ( File.Exists( targetExe ) == true )
+                        await WriteLatestCheck( targetExe, cancellationToken );
+
+                    return null;
+                }
                 _logger.LogDebug( "Tailwind: Has {NrReleases} releases", all.Count );
 
                 var allq = all.AsQueryable();
@@ -247,7 +273,6 @@ public class TailwindHostedService : BackgroundService
          */
         _logger.LogInformation( "Downloading from {Url}...", asset.DownloadUrl );
         await DownloadTo( asset.DownloadUrl, targetExe, cancellationToken );
-        await WriteLatestCheck( targetExe, cancellationToken );
 
 
         /*
@@ -259,6 +284,8 @@ public class TailwindHostedService : BackgroundService
             var info = new UnixFileInfo( targetExe );
             info.FileAccessPermissions |= FileAccessPermissions.UserExecute;
         }
+
+        await WriteLatestCheck( targetExe, cancellationToken );
 
         return targetExe;
     }
@@ -434,6 +461,8 @@ public class TailwindHostedService : BackgroundService
         if ( fileName == null )
             throw new ArgumentOutOfRangeException( nameof( fileName ), "Empty file name" );
 
+        Directory.CreateDirectory( directory );
+
         var watcher = new FileSystemWatcher( directory, fileName )
         {
             NotifyFilter = NotifyFilters.LastWrite
@@ -503,27 +532,26 @@ public class TailwindHostedService : BackgroundService
 
         process.Start();
 
+        using ( cancellationToken.Register( () =>
+        {
+            try { if ( !process.HasExited ) process.Kill( true ); }
+            catch { }
+        } ) )
+        {
+            string? firstLine = await process.StandardOutput.ReadLineAsync().WaitAsync( cancellationToken );
 
-        /*
-         * 
-         */
-        string? firstLine = await process.StandardOutput.ReadLineAsync().WaitAsync( cancellationToken );
+            await process.WaitForExitAsync( cancellationToken );
 
-        await process.WaitForExitAsync( cancellationToken );
+            if ( string.IsNullOrWhiteSpace( firstLine ) == true )
+                return null;
 
-        if ( string.IsNullOrWhiteSpace( firstLine ) == true )
-            return null;
+            var match = Regex.Match( firstLine, @"v\d+\.\d+\.\d+" );
 
+            if ( match.Success == false )
+                return null;
 
-        /*
-         * 
-         */
-        var match = Regex.Match( firstLine, @"v\d+\.\d+\.\d+" );
-
-        if ( match.Success == false )
-            return null;
-
-        return match.Value;
+            return match.Value;
+        }
     }
 
 
@@ -649,8 +677,10 @@ public class TailwindHostedService : BackgroundService
             };
 
             using var proc = System.Diagnostics.Process.Start( psi );
-            string output = proc!.StandardOutput.ReadToEnd() + proc.StandardError.ReadToEnd();
+            var stdoutTask = proc!.StandardOutput.ReadToEndAsync();
+            var stderrTask = proc.StandardError.ReadToEndAsync();
             proc.WaitForExit( 1_000 );
+            string output = stdoutTask.GetAwaiter().GetResult() + stderrTask.GetAwaiter().GetResult();
 
             return output.ToLowerInvariant().Contains( "musl" );
         }
@@ -733,8 +763,21 @@ public class TailwindHostedService : BackgroundService
         // Ensure directory exists
         Directory.CreateDirectory( Path.GetDirectoryName( filePath )! );
 
-        // Open file for writing (overwrite)
-        await using var fs = new FileStream( filePath, FileMode.Create, FileAccess.Write, FileShare.None );
-        await response.Content.CopyToAsync( fs, cancellationToken );
+        // Write to a temp file; move atomically on success so a cancelled/failed download
+        // never leaves a truncated binary at the target path.
+        var tmpPath = filePath + ".tmp";
+
+        try
+        {
+            await using var fs = new FileStream( tmpPath, FileMode.Create, FileAccess.Write, FileShare.None );
+            await response.Content.CopyToAsync( fs, cancellationToken );
+        }
+        catch
+        {
+            try { File.Delete( tmpPath ); } catch { }
+            throw;
+        }
+
+        File.Move( tmpPath, filePath, overwrite: true );
     }
 }

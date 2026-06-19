@@ -22,7 +22,7 @@ public class TailwindCommand
     /// <summary />
     public string AsArguments()
     {
-        var s = $"--watch --input {InputFile} --output {OutputFile}";
+        var s = $"--watch --input \"{InputFile}\" --output \"{OutputFile}\"";
 
         if ( this.OutputMinify == true )
             s += " --minify";
