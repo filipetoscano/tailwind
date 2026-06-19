@@ -16,7 +16,7 @@ Features
 * Checks for updates (may be turned off)
 * Skips update checks if internet is not available
 * Monitors input file: restarts Tailwind CLI on changes
-* Monitors configuration files: restarts Tailwind CLI on changes
+* Monitors configuration: restarts Tailwind CLI on changes
 
 
 Installing
@@ -36,11 +36,31 @@ Add to program/entry class:
 builder.Services.AddOptions();
 builder.Services.AddHttpClient();
 
-builder.Services.AddOptions<TailwindHostedServiceOptions>()
-	.Bind( builder.Configuration.GetSection( "Tailwind" ) );
+if ( builder.Environment.IsDevelopment() == true )
+{
+  builder.Services.Configure<TailwindHostedServiceOptions>( o =>
+  {
+    o.InputFile = "./wwwroot/css/input.css";
+    o.OutputFile = "./wwwroot/css/output.css";
+  } );
+
+  builder.Services.AddHostedService<TailwindHostedService>();
+}
+```
+
+Alternatively, if you'd rather bind to configuration file:
+
+```
+builder.Services.AddOptions();
+builder.Services.AddHttpClient();
 
 if ( builder.Environment.IsDevelopment() == true )
-	builder.Services.AddHostedService<TailwindHostedService>();
+{
+  builder.Services.AddOptions<TailwindHostedServiceOptions>()
+    .Bind( builder.Configuration.GetSection( "Tailwind" ) );
+
+  builder.Services.AddHostedService<TailwindHostedService>();
+}
 ```
 
 
