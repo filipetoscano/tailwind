@@ -54,7 +54,7 @@ public class TailwindHostedService : BackgroundService
             var lts = CancellationTokenSource.CreateLinkedTokenSource( stoppingToken, cts.Token );
 
             var opt = _om.CurrentValue;
-            var tw = await EnsureTailwind( opt, stoppingToken );
+            var tw = await EnsureTailwind( opt, lts.Token );
             var cmd = ExpandCommand( opt, tw );
             FileSystemWatcher? fsw = null;
 
@@ -93,9 +93,10 @@ public class TailwindHostedService : BackgroundService
             if ( cts.IsCancellationRequested == true )
             {
                 fsw?.Dispose();
-                cts.Dispose();
 
+                var oldCts = cts;
                 cts = new CancellationTokenSource();
+                oldCts.Dispose();
             }
         }
 
@@ -162,6 +163,7 @@ public class TailwindHostedService : BackgroundService
             if ( File.Exists( targetExe ) == true )
             {
                 _logger.LogInformation( "Tailwind available but failed to check latest version, using as is" );
+                await WriteLatestCheck( targetExe, cancellationToken );
                 return targetExe;
             }
             else
@@ -202,7 +204,9 @@ public class TailwindHostedService : BackgroundService
                 if ( candidate == null )
                 {
                     _logger.LogWarning( "No matching release found: use draft={UseDraft}, use pre-release={UsePreRelease}", opt.UseDraft, opt.UsePreRelease );
-                    await WriteLatestCheck( targetExe, cancellationToken );
+
+                    if ( File.Exists( targetExe ) == true )
+                        await WriteLatestCheck( targetExe, cancellationToken );
 
                     return null;
                 }
@@ -215,12 +219,14 @@ public class TailwindHostedService : BackgroundService
         /*
          * 
          */
-        var asset = latest.Assets?.SingleOrDefault( x => x.Name == bin );
+        var asset = latest.Assets?.FirstOrDefault( x => x.Name == bin );
 
         if ( asset == null )
         {
             _logger.LogWarning( "No tailwind for arch/OS: no asset with name {AssetName} found", bin );
-            await WriteLatestCheck( targetExe, cancellationToken );
+
+            if ( File.Exists( targetExe ) == true )
+                await WriteLatestCheck( targetExe, cancellationToken );
 
             return null;
         }
@@ -325,7 +331,6 @@ public class TailwindHostedService : BackgroundService
         process.Exited += ( s, e ) =>
         {
             tcs.TrySetResult( process.ExitCode );
-            process.Dispose();
         };
 
         try
@@ -349,18 +354,23 @@ public class TailwindHostedService : BackgroundService
                 }
             } ) )
             {
-                return await tcs.Task.ConfigureAwait( false );
+                var exitCode = await tcs.Task.ConfigureAwait( false );
+                process.WaitForExit();
+                return exitCode;
             }
         }
         catch ( TaskCanceledException )
         {
-            // ?
             return -2;
         }
         catch ( Exception ex )
         {
             _logger.LogError( ex, "Failed to run Tailwind binary" );
             return -1;
+        }
+        finally
+        {
+            process.Dispose();
         }
     }
 
@@ -662,7 +672,10 @@ public class TailwindHostedService : BackgroundService
 
         // If not development, always use base directory
         if ( env.Equals( "Development", StringComparison.OrdinalIgnoreCase ) == false )
-            return AppContext.BaseDirectory;
+        {
+            var relativePart = path.StartsWith( "~" ) ? "." + path.Substring( 1 ) : path;
+            return Path.GetFullPath( Path.Combine( AppContext.BaseDirectory, relativePart ) );
+        }
 
         // Development mode
         var startDir = new DirectoryInfo( AppContext.BaseDirectory );
@@ -714,7 +727,7 @@ public class TailwindHostedService : BackgroundService
         if ( string.IsNullOrWhiteSpace( filePath ) )
             throw new ArgumentException( "File path cannot be null or empty.", nameof( filePath ) );
 
-        using var response = await _http.GetAsync( url, HttpCompletionOption.ResponseHeadersRead );
+        using var response = await _http.GetAsync( url, HttpCompletionOption.ResponseHeadersRead, cancellationToken );
         response.EnsureSuccessStatusCode();
 
         // Ensure directory exists
@@ -722,6 +735,6 @@ public class TailwindHostedService : BackgroundService
 
         // Open file for writing (overwrite)
         await using var fs = new FileStream( filePath, FileMode.Create, FileAccess.Write, FileShare.None );
-        await response.Content.CopyToAsync( fs );
+        await response.Content.CopyToAsync( fs, cancellationToken );
     }
 }
