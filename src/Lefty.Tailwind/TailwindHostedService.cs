@@ -34,79 +34,110 @@ public class TailwindHostedService : BackgroundService
     protected override async Task ExecuteAsync( CancellationToken stoppingToken )
     {
         /*
-         *
+         * Store the OnChange registration so it can be removed on shutdown,
+         * preventing the callback from firing on a disposed CTS after the
+         * loop exits.
          */
         var cts = new CancellationTokenSource();
 
-        _om.OnChange( ( x, _ ) =>
+        var onChangeRegistration = _om.OnChange( ( x, _ ) =>
         {
             _logger.LogWarning( "Tailwind: Configuration reloaded" );
 
-            cts.Cancel();
+            try { cts.Cancel(); }
+            catch ( ObjectDisposedException ) { }
         } );
 
-
-        /*
-         * 
-         */
-        while ( stoppingToken.IsCancellationRequested == false )
+        try
         {
-            var lts = CancellationTokenSource.CreateLinkedTokenSource( stoppingToken, cts.Token );
-
-            var opt = _om.CurrentValue;
-            var tw = await EnsureTailwind( opt, lts.Token );
-            var cmd = ExpandCommand( opt, tw );
-            FileSystemWatcher? fsw = null;
-
-
             /*
-             * 
+             *
              */
-            if ( cmd == null )
+            while ( stoppingToken.IsCancellationRequested == false )
             {
-                _logger.LogWarning( "** Nope" );
+                var lts = CancellationTokenSource.CreateLinkedTokenSource( stoppingToken, cts.Token );
 
-                await Task.Delay( Timeout.Infinite, lts.Token )
-                    .ContinueWith( ( _ ) => { } );
-            }
-            else
-            {
-                fsw = MonitorFile( cmd.InputFile, ( ea ) =>
+                // Hoisted so the catch block can dispose it if an OCE escapes early (Race 7).
+                FileSystemWatcher? fsw = null;
+
+                try
                 {
-                    _logger.LogWarning( "Tailwind: Input file changed" );
+                    var opt = _om.CurrentValue;
+                    var tw = await EnsureTailwind( opt, lts.Token );
+                    var cmd = ExpandCommand( opt, tw );
 
-                    cts.Cancel();
-                } );
+
+                    /*
+                     *
+                     */
+                    if ( cmd == null )
+                    {
+                        _logger.LogWarning( "** Nope" );
+
+                        await Task.Delay( Timeout.Infinite, lts.Token )
+                            .ContinueWith( ( _ ) => { } );
+                    }
+                    else
+                    {
+                        // Capture the CTS for THIS iteration so that stale
+                        // FSW callbacks queued after fsw.Dispose() cancel the old CTS
+                        // (already disposed, caught below) rather than the next one.
+                        var iterationCts = cts;
+
+                        fsw = MonitorFile( cmd.InputFile, ( ea ) =>
+                        {
+                            _logger.LogWarning( "Tailwind: Input file changed" );
+
+                            try { iterationCts.Cancel(); }
+                            catch ( ObjectDisposedException ) { }
+                        } );
 
 
-                /*
-                 * 
-                 */
-                await File.WriteAllTextAsync( cmd.OutputFile, "/* empty */", lts.Token );
-                await RunTailwind( cmd.Tailwind, cmd.AsArguments(), lts.Token );
+                        /*
+                         *
+                         */
+                        await File.WriteAllTextAsync( cmd.OutputFile, "/* empty */", lts.Token );
+                        await RunTailwind( cmd.Tailwind, cmd.AsArguments(), lts.Token );
+                    }
+
+
+                    /*
+                     *
+                     */
+                    if ( cts.IsCancellationRequested == true )
+                    {
+                        fsw?.Dispose();
+                        fsw = null;
+
+                        var oldCts = cts;
+                        cts = new CancellationTokenSource();
+                        oldCts.Dispose();
+                    }
+                }
+                catch ( OperationCanceledException ) when ( stoppingToken.IsCancellationRequested == false )
+                {
+                    // A CTS-only cancellation (config-reload or FSW event) was
+                    // raised after lts was already formed but before the loop body's own
+                    // reset block ran. Reset here so the next iteration starts cleanly.
+                    fsw?.Dispose();
+
+                    var oldCts = cts;
+                    cts = new CancellationTokenSource();
+                    oldCts.Dispose();
+                }
+                finally
+                {
+                    lts.Dispose();
+                }
             }
-
-
-            /*
-             * 
-             */
-            if ( cts.IsCancellationRequested == true )
-            {
-                fsw?.Dispose();
-
-                var oldCts = cts;
-                cts = new CancellationTokenSource();
-                oldCts.Dispose();
-            }
-
-            lts.Dispose();
         }
-
-
-        /*
-         * 
-         */
-        cts.Dispose();
+        finally
+        {
+            // Unregister the OnChange callback before disposing the CTS so the
+            // callback can never fire on a disposed object after we exit.
+            onChangeRegistration?.Dispose();
+            cts.Dispose();
+        }
     }
 
 
@@ -376,9 +407,8 @@ public class TailwindHostedService : BackgroundService
                     if ( process.HasExited == false )
                         process.Kill( true );
                 }
-                catch
-                {
-                }
+                catch ( InvalidOperationException ) { } // process exited between check and Kill
+                catch ( Exception ) { }
             } ) )
             {
                 var exitCode = await tcs.Task.ConfigureAwait( false );
@@ -487,9 +517,13 @@ public class TailwindHostedService : BackgroundService
          */
         watcher.Error += ( s, e ) =>
         {
-            _logger.LogWarning( "FileSystemWatcher buffer overflowed. Monitoring restarted." );
-            watcher.EnableRaisingEvents = false;
-            watcher.EnableRaisingEvents = true;
+            try
+            {
+                _logger.LogWarning( "FileSystemWatcher buffer overflowed. Monitoring restarted." );
+                watcher.EnableRaisingEvents = false;
+                watcher.EnableRaisingEvents = true;
+            }
+            catch ( ObjectDisposedException ) { }
         };
 
         return watcher;
@@ -535,7 +569,8 @@ public class TailwindHostedService : BackgroundService
         using ( cancellationToken.Register( () =>
         {
             try { if ( !process.HasExited ) process.Kill( true ); }
-            catch { }
+            catch ( InvalidOperationException ) { } // process exited between check and Kill
+            catch ( Exception ) { }
         } ) )
         {
             string? firstLine = await process.StandardOutput.ReadLineAsync().WaitAsync( cancellationToken );
